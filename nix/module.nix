@@ -125,7 +125,7 @@ let
       export RBW_AGENT="${pkgs.rbw}/bin/rbw-agent"
       ${lib.concatMapStringsSep "\n" (
         account:
-        "${pkgs.rbw}/bin/rbw --account ${lib.escapeShellArg account} stop-agent &>/dev/null || true"
+        "${pkgs.rbw}/bin/rbw --account ${lib.escapeShellArg account} stop-agent --kill &>/dev/null || true"
       ) accounts}
       exit 0
     '';
