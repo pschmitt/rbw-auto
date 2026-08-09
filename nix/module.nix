@@ -18,7 +18,7 @@ let
   envList = env: lib.mapAttrsToList (n: v: ''${n}="${toString v}"'') env;
 
   # rbw account config.json only ever needs non-secret connection metadata
-  # (name/email/base_url/sso_id) -- the master password and, for
+  # (name/email/baseUrl/ssoId) -- the master password and, for
   # bitwarden.com, the personal-API-key used by `rbw register` are never
   # written to disk here. Both are supplied at service-start time as plain
   # environment variables (via environmentFiles, same as every other
@@ -55,8 +55,8 @@ let
     {
       inherit (a) name email;
     }
-    // lib.optionalAttrs (a.baseUrl != null) { base_url = a.baseUrl; }
-    // lib.optionalAttrs (a.ssoId != null) { sso_id = a.ssoId; };
+    // lib.optionalAttrs (a.baseUrl != null) { baseUrl = a.baseUrl; }
+    // lib.optionalAttrs (a.ssoId != null) { ssoId = a.ssoId; };
 
   # Renders rbw's config.json for a set of accounts. Placed via tmpfiles
   # (see below), not `environment.etc`, since it's per-service-user rather
@@ -66,7 +66,7 @@ let
     pkgs.writeText "rbw-config.json" (
       builtins.toJSON {
         accounts = map renderAccount accounts;
-        primary_account = (lib.head accounts).name;
+        primaryAccount = (lib.head accounts).name;
       }
     );
 

@@ -16,7 +16,7 @@ tarball. There's no compatibility shim -- old archives from before this
 rewrite must be restored with the old `bw`-CLI-based tooling.
 
 Every account used here (for backup, or as sync source/destination) must
-already be configured in `rbw`'s `config.json` (name/email/base_url) --
+already be configured in `rbw`'s `config.json` (name/email/baseUrl) --
 these scripts only ever supply the master password (and, once, a personal
 API key for `rbw register`) at runtime. The NixOS module (see below)
 renders `config.json` for you; for plain Docker usage, `entrypoint.sh`

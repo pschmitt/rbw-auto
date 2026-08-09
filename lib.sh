@@ -52,7 +52,7 @@ rbw_totp_code() {
 
 # Logs a configured rbw account in and unlocks it, both non-interactively via
 # --stdin, then refreshes its local db cache. Requires the account to already
-# be present in rbw's config.json (email/base_url etc) -- only the master
+# be present in rbw's config.json (email/baseUrl etc) -- only the master
 # password (and, if the account has TOTP-based 2FA enabled, a base32 TOTP
 # secret to generate fresh codes from) is supplied here.
 rbw_prepare_account() {
@@ -69,7 +69,7 @@ rbw_prepare_account() {
   fi
   if ! printf '%s\n' "$password" | rbw --account "$account" login --stdin "${totp_args[@]}"
   then
-    echo_error "[$account] Login failed. Verify the account's email/base_url in config.json (and, for bitwarden.com, that 'rbw register' has been run)."
+    echo_error "[$account] Login failed. Verify the account's email/baseUrl in config.json (and, for bitwarden.com, that 'rbw register' has been run)."
     return 1
   fi
 

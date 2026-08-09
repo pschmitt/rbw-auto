@@ -7,7 +7,7 @@ source lib.sh
 RBW_CONFIG_DIR="${HOME:-/root}/.config/rbw"
 RBW_CONFIG_FILE="${RBW_CONFIG_DIR}/config.json"
 
-# Renders one account entry (name/email/base_url) as JSON. rbw's config.json
+# Renders one account entry (name/email/baseUrl) as JSON. rbw's config.json
 # only ever holds this non-secret connection metadata -- master passwords
 # and register API keys stay in env vars, read by bw-backup.sh/bw-sync.sh
 # and piped to `rbw ... --stdin`, never written to disk here.
@@ -17,12 +17,12 @@ account_json() {
   local base_url="$3"
 
   jq -nc --arg name "$name" --arg email "$email" --arg base_url "$base_url" \
-    '{name: $name, email: $email} + (if $base_url != "" then {base_url: $base_url} else {} end)'
+    '{name: $name, email: $email} + (if $base_url != "" then {baseUrl: $base_url} else {} end)'
 }
 
 write_rbw_config() {
   mkdir -p "$RBW_CONFIG_DIR"
-  jq -sc '{accounts: ., primary_account: .[0].name}' "$@" > "$RBW_CONFIG_FILE"
+  jq -sc '{accounts: ., primaryAccount: .[0].name}' "$@" > "$RBW_CONFIG_FILE"
 }
 
 COMMAND="${1:-backup}"
