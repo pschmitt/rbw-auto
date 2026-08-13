@@ -103,7 +103,7 @@ let
     '';
 
   mkRegisterScript =
-    name: checks:
+    name: checks: accounts:
     pkgs.writeShellScript "${name}-register" ''
       set -euo pipefail
       # rbw spawns rbw-agent via a plain PATH lookup (or $RBW_AGENT if set),
@@ -111,6 +111,17 @@ let
       export PATH="${pkgs.rbw}/bin:$PATH"
       export RBW_AGENT="${pkgs.rbw}/bin/rbw-agent"
       ${lib.concatStringsSep "\n" checks}
+      # A `register --stdin` call above lazily spawns rbw-agent, which then
+      # outlives this script. Left running, it keeps holding a copy of the
+      # withLock flock fd it inherited, so the *next* stage's own `flock` on
+      # that same lockfile (ExecStart) blocks forever waiting on a lock this
+      # dead-end agent never releases. Stop it here, the same way
+      # mkAgentStopScript does for ExecStopPost, so no agent survives past
+      # the stage that (maybe) started it.
+      ${lib.concatMapStringsSep "\n" (
+        account:
+        "${pkgs.rbw}/bin/rbw --account ${lib.escapeShellArg account} stop-agent --kill &>/dev/null || true"
+      ) accounts}
     '';
 
   # A oneshot job has no business keeping rbw-agent alive after it exits --
@@ -610,13 +621,16 @@ in
               );
               ExecStartPre =
                 withLock config.users.users.${cfg.backupUser}.home
-                  "${mkRegisterScript "rbw-auto-backup-${name}" [
-                    (mkRegisterCheck {
-                      account = job.account.name;
-                      clientIdVar = "BW_BACKUP_REGISTER_CLIENT_ID";
-                      clientSecretVar = "BW_BACKUP_REGISTER_CLIENT_SECRET";
-                    })
-                  ]}";
+                  "${mkRegisterScript "rbw-auto-backup-${name}"
+                    [
+                      (mkRegisterCheck {
+                        account = job.account.name;
+                        clientIdVar = "BW_BACKUP_REGISTER_CLIENT_ID";
+                        clientSecretVar = "BW_BACKUP_REGISTER_CLIENT_SECRET";
+                      })
+                    ]
+                    [ job.account.name ]
+                  }";
               ExecStart =
                 withLock config.users.users.${cfg.backupUser}.home
                   "${cfg.backupPackage}/bin/rbw-auto-backup";
@@ -655,18 +669,21 @@ in
               );
               ExecStartPre =
                 withLock config.users.users.${cfg.syncUser}.home
-                  "${mkRegisterScript "rbw-auto-sync-${name}" [
-                    (mkRegisterCheck {
-                      account = job.sourceAccount.name;
-                      clientIdVar = "SRC_REGISTER_CLIENT_ID";
-                      clientSecretVar = "SRC_REGISTER_CLIENT_SECRET";
-                    })
-                    (mkRegisterCheck {
-                      account = job.destAccount.name;
-                      clientIdVar = "DEST_REGISTER_CLIENT_ID";
-                      clientSecretVar = "DEST_REGISTER_CLIENT_SECRET";
-                    })
-                  ]}";
+                  "${mkRegisterScript "rbw-auto-sync-${name}"
+                    [
+                      (mkRegisterCheck {
+                        account = job.sourceAccount.name;
+                        clientIdVar = "SRC_REGISTER_CLIENT_ID";
+                        clientSecretVar = "SRC_REGISTER_CLIENT_SECRET";
+                      })
+                      (mkRegisterCheck {
+                        account = job.destAccount.name;
+                        clientIdVar = "DEST_REGISTER_CLIENT_ID";
+                        clientSecretVar = "DEST_REGISTER_CLIENT_SECRET";
+                      })
+                    ]
+                    [ job.sourceAccount.name job.destAccount.name ]
+                  }";
               ExecStart = withLock config.users.users.${cfg.syncUser}.home "${cfg.syncPackage}/bin/rbw-auto-sync";
               ExecStopPost =
                 withLock config.users.users.${cfg.syncUser}.home
