@@ -130,6 +130,24 @@ let
       exit 0
     '';
 
+  # Every job of a given kind (all backupJobs, separately all syncJobs)
+  # shares one Unix user and therefore one rbw config.json/agent per
+  # account. Two of that kind's jobs referencing the same account (a common
+  # setup: e.g. two different sync targets off the same source vault) touch
+  # that account's rbw-agent from wholly independent, timer-triggered
+  # oneshot units that can start within the same second of each other.
+  # Observed in production: one job's `rbw register`/sync hitting the agent
+  # mid-spawn ("failed to connect to rbw-agent: Connection refused") or
+  # having its agent yanked out from under it by the sibling job's own
+  # stop-agent-on-exit (mkAgentStopScript) -- "EOF while parsing a value".
+  # A single flock per kind, held across each job's
+  # register/sync-or-backup/stop-agent stages, fully serializes account
+  # access within that kind. Cheap: these are daily oneshots, not a
+  # throughput concern.
+  lockFile = home: "${home}/.rbw-auto.lock";
+
+  withLock = home: cmd: "${pkgs.util-linux}/bin/flock ${lockFile home} ${cmd}";
+
   mkLastRunCheck =
     {
       name,
@@ -590,15 +608,21 @@ in
                 }
                 // job.environment
               );
-              ExecStartPre = "${mkRegisterScript "rbw-auto-backup-${name}" [
-                (mkRegisterCheck {
-                  account = job.account.name;
-                  clientIdVar = "BW_BACKUP_REGISTER_CLIENT_ID";
-                  clientSecretVar = "BW_BACKUP_REGISTER_CLIENT_SECRET";
-                })
-              ]}";
-              ExecStart = "${cfg.backupPackage}/bin/rbw-auto-backup";
-              ExecStopPost = "${mkAgentStopScript "rbw-auto-backup-${name}" [ job.account.name ]}";
+              ExecStartPre =
+                withLock config.users.users.${cfg.backupUser}.home
+                  "${mkRegisterScript "rbw-auto-backup-${name}" [
+                    (mkRegisterCheck {
+                      account = job.account.name;
+                      clientIdVar = "BW_BACKUP_REGISTER_CLIENT_ID";
+                      clientSecretVar = "BW_BACKUP_REGISTER_CLIENT_SECRET";
+                    })
+                  ]}";
+              ExecStart =
+                withLock config.users.users.${cfg.backupUser}.home
+                  "${cfg.backupPackage}/bin/rbw-auto-backup";
+              ExecStopPost =
+                withLock config.users.users.${cfg.backupUser}.home
+                  "${mkAgentStopScript "rbw-auto-backup-${name}" [ job.account.name ]}";
             };
           }
         ) enabledBackups)
@@ -629,23 +653,27 @@ in
                 })
                 // job.environment
               );
-              ExecStartPre = "${mkRegisterScript "rbw-auto-sync-${name}" [
-                (mkRegisterCheck {
-                  account = job.sourceAccount.name;
-                  clientIdVar = "SRC_REGISTER_CLIENT_ID";
-                  clientSecretVar = "SRC_REGISTER_CLIENT_SECRET";
-                })
-                (mkRegisterCheck {
-                  account = job.destAccount.name;
-                  clientIdVar = "DEST_REGISTER_CLIENT_ID";
-                  clientSecretVar = "DEST_REGISTER_CLIENT_SECRET";
-                })
-              ]}";
-              ExecStart = "${cfg.syncPackage}/bin/rbw-auto-sync";
-              ExecStopPost = "${mkAgentStopScript "rbw-auto-sync-${name}" [
-                job.sourceAccount.name
-                job.destAccount.name
-              ]}";
+              ExecStartPre =
+                withLock config.users.users.${cfg.syncUser}.home
+                  "${mkRegisterScript "rbw-auto-sync-${name}" [
+                    (mkRegisterCheck {
+                      account = job.sourceAccount.name;
+                      clientIdVar = "SRC_REGISTER_CLIENT_ID";
+                      clientSecretVar = "SRC_REGISTER_CLIENT_SECRET";
+                    })
+                    (mkRegisterCheck {
+                      account = job.destAccount.name;
+                      clientIdVar = "DEST_REGISTER_CLIENT_ID";
+                      clientSecretVar = "DEST_REGISTER_CLIENT_SECRET";
+                    })
+                  ]}";
+              ExecStart = withLock config.users.users.${cfg.syncUser}.home "${cfg.syncPackage}/bin/rbw-auto-sync";
+              ExecStopPost =
+                withLock config.users.users.${cfg.syncUser}.home
+                  "${mkAgentStopScript "rbw-auto-sync-${name}" [
+                    job.sourceAccount.name
+                    job.destAccount.name
+                  ]}";
             };
           }
         ) enabledSyncs);
