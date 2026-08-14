@@ -55,8 +55,8 @@ let
     {
       inherit (a) name email;
     }
-    // lib.optionalAttrs (a.baseUrl != null) { baseUrl = a.baseUrl; }
-    // lib.optionalAttrs (a.ssoId != null) { ssoId = a.ssoId; };
+    // lib.optionalAttrs (a.baseUrl != null) { inherit (a) baseUrl; }
+    // lib.optionalAttrs (a.ssoId != null) { inherit (a) ssoId; };
 
   # Renders rbw's config.json for a set of accounts. Placed via tmpfiles
   # (see below), not `environment.etc`, since it's per-service-user rather
@@ -69,6 +69,45 @@ let
         primaryAccount = (lib.head accounts).name;
       }
     );
+
+  # Renders the non-secret mirror plan consumed by `rbw mirror --config`.
+  # One file can contain all enabled sync jobs, so one systemd service can
+  # prepare the shared accounts once and execute the plan sequentially.
+  mkMirrorConfigFile =
+    jobs:
+    let
+      common = job: {
+        from = job.sourceAccount.name;
+        to = job.destAccount.name;
+        attachments = true;
+        overwrite = true;
+      };
+      specs = lib.concatMap (
+        job:
+        if job.mode == "personal" then
+          [
+            (
+              common job
+              // {
+                purgeDest = job.purgeDestination;
+              }
+            )
+          ]
+        else
+          map (
+            collection:
+            common job
+            // {
+              inherit collection;
+              destCollection = collection;
+              destOrg = job.collections.org;
+              purgeDest = true;
+              fallbackToWholeVault = true;
+            }
+          ) job.collections.names
+      ) (lib.attrValues jobs);
+    in
+    pkgs.writeText "rbw-auto-mirrors.yaml" (builtins.toJSON { mirrors = specs; });
 
   rbwConfigTmpfiles =
     {
@@ -141,20 +180,11 @@ let
       exit 0
     '';
 
-  # Every job of a given kind (all backupJobs, separately all syncJobs)
-  # shares one Unix user and therefore one rbw config.json/agent per
-  # account. Two of that kind's jobs referencing the same account (a common
-  # setup: e.g. two different sync targets off the same source vault) touch
-  # that account's rbw-agent from wholly independent, timer-triggered
-  # oneshot units that can start within the same second of each other.
-  # Observed in production: one job's `rbw register`/sync hitting the agent
-  # mid-spawn ("failed to connect to rbw-agent: Connection refused") or
-  # having its agent yanked out from under it by the sibling job's own
-  # stop-agent-on-exit (mkAgentStopScript) -- "EOF while parsing a value".
-  # A single flock per kind, held across each job's
-  # register/sync-or-backup/stop-agent stages, fully serializes account
-  # access within that kind. Cheap: these are daily oneshots, not a
-  # throughput concern.
+  # Jobs share one Unix user and therefore one rbw config.json/agent per
+  # account. Backups retain one service per job; sync jobs are deliberately
+  # batched into one service below because they share accounts and a mirror
+  # plan can execute them sequentially. The flock remains a guard against
+  # overlap with another invocation or a backup using the same home.
   lockFile = home: "${home}/.rbw-auto.lock";
 
   withLock = home: cmd: "${pkgs.util-linux}/bin/flock ${lockFile home} ${cmd}";
@@ -192,14 +222,11 @@ let
       fi
     '';
 
-  # Each named backup/sync job gets its own independent systemd
-  # service+timer (rbw-auto-backup-<name>/rbw-auto-sync-<name>), the way
-  # `services.restic.backups.<name>` works -- rather than one fixed job (or,
-  # for sync, one fixed job plus a single hardcoded "collections" variant).
-  # Jobs of the same kind still share one system user/group (and therefore
-  # one rbw config.json listing every account any of that kind's enabled
-  # jobs use) since rbw's own multi-account support already keys entirely
-  # off --account; there's no need for one Unix user per job.
+  # Each named backup job gets its own independent systemd service+timer.
+  # Enabled sync jobs share one service+timer and one rendered mirror plan,
+  # while all jobs of a kind still share one system user/group and rbw
+  # config.json because rbw's multi-account support keys everything off
+  # --account.
   backupJobModule = types.submodule (
     { name, ... }:
     {
@@ -427,6 +454,28 @@ let
 
   backupAccounts = lib.unique backupAccountsRaw;
   syncAccounts = lib.unique syncAccountsRaw;
+
+  syncCredentialMappings = lib.unique (
+    lib.concatMap (job: [
+      {
+        account = job.sourceAccount.name;
+        passwordVar = "SRC_BW_PASSWORD";
+        totpVar = "SRC_BW_TOTP_SECRET";
+      }
+      {
+        account = job.destAccount.name;
+        passwordVar = "DEST_BW_PASSWORD";
+        totpVar = "DEST_BW_TOTP_SECRET";
+      }
+    ]) (lib.attrValues enabledSyncs)
+  );
+
+  syncPeriodValues = lib.unique (map (job: job.period) (lib.attrValues enabledSyncs));
+  syncPeriod = if syncPeriodValues == [ ] then "daily" else lib.head syncPeriodValues;
+  syncEnvironmentFiles = lib.unique (
+    lib.concatMap (job: job.environmentFiles) (lib.attrValues enabledSyncs)
+  );
+  syncHome = config.users.users.${cfg.syncUser}.home;
 in
 {
   options = {
@@ -448,6 +497,12 @@ in
         type = types.str;
         default = "bw-backup";
         description = "System group used to run backup jobs.";
+      };
+
+      backupRandomizedDelaySec = mkOption {
+        type = types.str;
+        default = "1h";
+        description = "systemd RandomizedDelaySec applied to backup timers.";
       };
 
       backupJobs = mkOption {
@@ -488,14 +543,20 @@ in
         description = "System group used to run sync jobs.";
       };
 
+      syncRandomizedDelaySec = mkOption {
+        type = types.str;
+        default = "1h";
+        description = "systemd RandomizedDelaySec applied to the sync timer.";
+      };
+
       syncJobs = mkOption {
         type = types.attrsOf syncJobModule;
         default = { };
         description = ''
-          Named Bitwarden vault-mirror sync jobs. Each gets its own
-          independent systemd service+timer (`rbw-auto-sync-<name>`), so
-          different account pairs/modes/schedules can run entirely
-          independently of one another.
+          Named Bitwarden vault-mirror jobs. Enabled jobs are rendered into
+          one sequential mirror plan and run by the single
+          `rbw-auto-sync` service and timer. All enabled jobs must therefore
+          use the same `period` value.
         '';
         example = lib.literalExpression ''
           {
@@ -529,6 +590,10 @@ in
           one job with different email/baseUrl/ssoId. All jobs sharing an
           account name must describe it identically.
         '';
+      }
+      {
+        assertion = lib.length syncPeriodValues <= 1;
+        message = "services.rbw-auto.syncJobs: all enabled jobs must use the same period when batched into one systemd timer";
       }
     ]
     ++ (lib.mapAttrsToList (name: job: {
@@ -594,9 +659,12 @@ in
         ++ (lib.optionals anySyncs (rbwConfigTmpfiles {
           user = cfg.syncUser;
           group = cfg.syncGroup;
-          home = config.users.users.${cfg.syncUser}.home;
+          home = syncHome;
           accounts = syncAccounts;
         }))
+        ++ lib.optionals anySyncs [
+          "L+ ${syncHome}/.config/rbw/mirrors.yaml - - - - ${mkMirrorConfigFile enabledSyncs}"
+        ]
       );
 
       services =
@@ -640,60 +708,48 @@ in
             };
           }
         ) enabledBackups)
-        // (lib.mapAttrs' (
-          name: job:
-          lib.nameValuePair "rbw-auto-sync-${name}" {
-            description = "Bitwarden vault mirror sync (${name}, ${job.mode})";
+        // (lib.optionalAttrs anySyncs {
+          "rbw-auto-sync" = {
+            description = "Bitwarden vault mirror sync";
             serviceConfig = {
               Type = "oneshot";
               User = cfg.syncUser;
               Group = cfg.syncGroup;
-              WorkingDirectory = job.workDir;
-              ReadWritePaths = [ job.workDir ];
-              EnvironmentFile = job.environmentFiles;
+              WorkingDirectory = syncHome;
+              ReadWritePaths = [ syncHome ] ++ map (job: job.workDir) (lib.attrValues enabledSyncs);
+              EnvironmentFile = syncEnvironmentFiles;
               Environment = envList (
                 {
-                  SRC_ACCOUNT = job.sourceAccount.name;
-                  DEST_ACCOUNT = job.destAccount.name;
-                  WORKDIR = job.workDir;
-                  BW_SYNC_MODE = job.mode;
+                  RBW_MIRROR_CONFIG = "${syncHome}/.config/rbw/mirrors.yaml";
+                  RBW_SYNC_ACCOUNTS = lib.concatStringsSep "," (map (account: account.name) syncAccounts);
+                  RBW_SYNC_ACCOUNT_CREDENTIALS = lib.concatStringsSep "," (
+                    map (mapping: "${mapping.account}:${mapping.passwordVar}:${mapping.totpVar}") syncCredentialMappings
+                  );
+                  RBW_SYNC_LAST_FILES = lib.concatStringsSep ":" (
+                    map (job: "${job.workDir}/LAST_SYNC") (lib.attrValues enabledSyncs)
+                  );
                 }
-                // (lib.optionalAttrs (job.mode == "personal" && job.purgeDestination) {
-                  DEST_BW_PURGE_VAULT = "1";
-                })
-                // (lib.optionalAttrs (job.mode == "collections") {
-                  DEST_BW_ORG = job.collections.org;
-                  DEST_BW_COLLECTIONS = lib.concatStringsSep "," job.collections.names;
-                })
-                // job.environment
+                // lib.foldl' (acc: job: acc // job.environment) { } (lib.attrValues enabledSyncs)
               );
-              ExecStartPre =
-                withLock config.users.users.${cfg.syncUser}.home
-                  "${mkRegisterScript "rbw-auto-sync-${name}"
-                    [
-                      (mkRegisterCheck {
-                        account = job.sourceAccount.name;
-                        clientIdVar = "SRC_REGISTER_CLIENT_ID";
-                        clientSecretVar = "SRC_REGISTER_CLIENT_SECRET";
-                      })
-                      (mkRegisterCheck {
-                        account = job.destAccount.name;
-                        clientIdVar = "DEST_REGISTER_CLIENT_ID";
-                        clientSecretVar = "DEST_REGISTER_CLIENT_SECRET";
-                      })
-                    ]
-                    [ job.sourceAccount.name job.destAccount.name ]
-                  }";
-              ExecStart = withLock config.users.users.${cfg.syncUser}.home "${cfg.syncPackage}/bin/rbw-auto-sync";
-              ExecStopPost =
-                withLock config.users.users.${cfg.syncUser}.home
-                  "${mkAgentStopScript "rbw-auto-sync-${name}" [
-                    job.sourceAccount.name
-                    job.destAccount.name
-                  ]}";
+              ExecStartPre = withLock syncHome "${mkRegisterScript "rbw-auto-sync" (lib.concatMap (job: [
+                (mkRegisterCheck {
+                  account = job.sourceAccount.name;
+                  clientIdVar = "SRC_REGISTER_CLIENT_ID";
+                  clientSecretVar = "SRC_REGISTER_CLIENT_SECRET";
+                })
+                (mkRegisterCheck {
+                  account = job.destAccount.name;
+                  clientIdVar = "DEST_REGISTER_CLIENT_ID";
+                  clientSecretVar = "DEST_REGISTER_CLIENT_SECRET";
+                })
+              ]) (lib.attrValues enabledSyncs)) (map (account: account.name) syncAccounts)}";
+              ExecStart = withLock syncHome "${cfg.syncPackage}/bin/rbw-auto-sync";
+              ExecStopPost = withLock syncHome "${mkAgentStopScript "rbw-auto-sync" (
+                map (account: account.name) syncAccounts
+              )}";
             };
-          }
-        ) enabledSyncs);
+          };
+        });
 
       timers =
         (lib.mapAttrs' (
@@ -703,21 +759,22 @@ in
             wantedBy = [ "timers.target" ];
             timerConfig = {
               OnCalendar = job.schedule;
+              RandomizedDelaySec = cfg.backupRandomizedDelaySec;
               Persistent = true;
             };
           }
         ) enabledBackups)
-        // (lib.mapAttrs' (
-          name: job:
-          lib.nameValuePair "rbw-auto-sync-${name}" {
-            description = "Run Bitwarden vault mirror sync (${name})";
+        // (lib.optionalAttrs anySyncs {
+          "rbw-auto-sync" = {
+            description = "Run Bitwarden vault mirror sync";
             wantedBy = [ "timers.target" ];
             timerConfig = {
-              OnCalendar = job.period;
+              OnCalendar = syncPeriod;
+              RandomizedDelaySec = cfg.syncRandomizedDelaySec;
               Persistent = true;
             };
-          }
-        ) enabledSyncs);
+          };
+        });
     };
 
     services.monit.config = lib.mkMerge (
