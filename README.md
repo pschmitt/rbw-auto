@@ -131,29 +131,29 @@ podman run -it --rm \
   existing destination entries untouched instead of overwriting them.
 - `HEALTHCHECK_URL` works here too; sync pings start/fail/success.
 
+The native `rbw mirror --config FILE` interface can also execute several
+mirror specs sequentially from one YAML or JSON file. This is what the NixOS
+module uses; the file is declaratively rendered and contains no credentials.
+See the rbw documentation for the complete schema.
+
 ## NixOS module
 
-`flake.nix` exports `nixosModules.default`, providing
-`services.rbw-auto-backup` and `services.rbw-auto-sync`. Both are
-collections of independent, named jobs -- `services.rbw-auto-backup.backups.<name>`
-and `services.rbw-auto-sync.syncs.<name>` -- the same way
-`services.restic.backups.<name>` works: each named job gets its own systemd
-service+timer (`rbw-auto-backup-<name>`/`rbw-auto-sync-<name>`), own
-schedule, own accounts, own Monit check, and can be enabled/disabled
-independently. Jobs of the same kind (all backups, or all syncs) share one
-system user/group and one declaratively-rendered `rbw` `config.json`
-listing every account any of that kind's jobs use (rbw's own multi-account
-support already keys everything off `--account`, so there's no need for
-separate Unix users per job). The same `rbw register` automation described
-above runs per-job from that job's own `environmentFiles`-supplied env
-vars. Every job's systemd unit also force-terminates `rbw-agent` for its
-account(s) on exit (`ExecStopPost`, regardless of success/failure) -- a
-oneshot job has no business leaving a background agent running, and a
-lingering one causes `systemd` to log a "left-over process in control
-group" warning on the job's next run.
+`flake.nix` exports `nixosModules.default`, providing `services.rbw-auto`.
+Backup jobs remain independent named service/timer pairs. Enabled sync jobs
+are instead rendered into one declarative `rbw mirror --config` plan and run
+sequentially by the single `rbw-auto-sync` service/timer, avoiding startup
+races between jobs sharing an rbw account. Sync jobs must use the same
+`period`; their individual `workDir` markers and Monit checks remain
+independent. Both job kinds share one system user/group and one
+declaratively-rendered rbw `config.json` listing their accounts. Every
+oneshot has an `ExecStopPost` backstop that terminates its rbw agents.
+
+Timer jitter is controlled with `services.rbw-auto.backupRandomizedDelaySec`
+and `services.rbw-auto.syncRandomizedDelaySec`; both default to `"1h"` and
+map directly to systemd's `RandomizedDelaySec`.
 
 ```nix
-services.rbw-auto-backup.backups.personal = {
+services.rbw-auto.backupJobs.personal = {
   account = {
     name = "personal";
     email = "me@example.com";
@@ -161,7 +161,7 @@ services.rbw-auto-backup.backups.personal = {
   environmentFiles = [ config.sops.secrets."rbw-auto-backup-personal".path ];
 };
 
-services.rbw-auto-sync.syncs.personal = {
+services.rbw-auto.syncJobs.personal = {
   sourceAccount = {
     name = "personal";
     email = "me@example.com";
@@ -175,7 +175,7 @@ services.rbw-auto-sync.syncs.personal = {
   environmentFiles = [ config.sops.secrets."rbw-auto-sync-personal".path ];
 };
 
-services.rbw-auto-sync.syncs.org-collections = {
+services.rbw-auto.syncJobs.collections = {
   sourceAccount = {
     name = "personal";
     email = "me@example.com";
