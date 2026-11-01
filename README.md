@@ -1,5 +1,10 @@
 # rbw-auto
 
+> **This project has moved.** The maintained source, documentation and NixOS
+> module now live in [`pschmitt/rbw`](https://github.com/pschmitt/rbw), under
+> [`auto/`](https://github.com/pschmitt/rbw/tree/main/auto).
+> The container image remains available as `ghcr.io/pschmitt/rbw-auto`.
+
 Backup and sync helpers for Bitwarden/Vaultwarden, built on top of
 [rbw](https://github.com/pschmitt/rbw) (specifically
 [pschmitt/rbw](https://github.com/pschmitt/rbw), a fork with multi-account
